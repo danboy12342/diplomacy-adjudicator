@@ -352,7 +352,7 @@ export default function DiplomacyApp() {
             Resolve Orders (Automated) →
           </button>
           {/* UPDATED FOOTER HERE */}
-          <div style={{marginTop:"8px", textAlign:"center", fontSize:"9px", color:"#3a4a5a", fontFamily:"monospace", letterSpacing:"1px", textTransform:"uppercase"}}>daniel shengyi</div>
+          <div style={{marginTop:"8px", textAlign:"center", fontSize:"9px", color:"#0d74db", fontFamily:"monospace", letterSpacing:"1px", textTransform:"uppercase"}}>daniel shengyi</div>
         </div>
       </div>
     </div>
