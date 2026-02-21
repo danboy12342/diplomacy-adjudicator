@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback, useEffect } from "react";
 import { COL, TEXT_COL, COUNTRIES, T, ADJ } from "./data.js";
 
 // Helper: Format orders for display
+// Handles all three phases (Move, Retreat, Adjust) so the order list always shows readable text
 function formatOrder(order, units, phase) {
   if (phase === "Adjust") {
     if (order.type === "Build") return `Build ${order.unitType} in ${order.loc}`;
@@ -61,6 +62,7 @@ export default function DiplomacyApp() {
   // Sync with Server
   useEffect(() => { fetch('/api/state').then(r => r.json()).then(syncState); }, []);
 
+  // Merges a full server snapshot into local React state
   const syncState = (data) => {
     setUnits(data.units); setControllers(data.controllers);
     setOrders(data.orders); setYear(data.year); setSeason(data.season);
@@ -125,11 +127,13 @@ export default function DiplomacyApp() {
 
   // ─── ACTIONS ──────────────────────────────────────────────────
 
+  // Persists orders locally and pushes them to the server
   const saveOrders = (newOrders) => {
     setOrders(newOrders);
     fetch('/api/orders', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({orders: newOrders}) });
   };
 
+  // Constructs and saves an order based on the current phase and form values
   const addOrder = () => {
     let newOrder = null;
 
@@ -162,6 +166,7 @@ export default function DiplomacyApp() {
     }
   };
 
+  // Removes an order — builds are keyed by loc, all other orders by unitId
   const removeOrder = (order) => {
     if (phase === "Adjust" && order.type === "Build") {
       saveOrders(orders.filter(o => o.loc !== order.loc));
@@ -170,6 +175,7 @@ export default function DiplomacyApp() {
     }
   };
 
+  // Sends orders to the server for adjudication and resyncs the resulting state
   const processOrders = () => {
     fetch('/api/process', { method: 'POST' }).then(r => r.json()).then(d => {
       syncState(d);
@@ -177,6 +183,7 @@ export default function DiplomacyApp() {
     });
   };
 
+  // Confirms before wiping all state back to 1901
   const resetGame = () => { if(confirm("Reset game?")) fetch('/api/reset', { method: 'POST' }).then(r => r.json()).then(syncState); };
 
   // ─── INTERACTION ──────────────────────────────────────────────
@@ -211,6 +218,7 @@ export default function DiplomacyApp() {
   };
 
   // ─── RENDER HELPERS ───────────────────────────────────────────
+  // Returns SVG fill colour for a territory; highlights buildable slots in Adjust phase
   const getTerritoryFill = id => {
     const terr = T[id];
     // Adjust Phase: Highlight buildable slots
@@ -222,8 +230,8 @@ export default function DiplomacyApp() {
     return "#8a7a50";
   };
   
-  const scCount = c => Object.values(controllers).filter(x => x === c).length;
-  const unitCount = c => units.filter(u => u.country === c).length;
+  const scCount = c => Object.values(controllers).filter(x => x === c).length;   // supply centres owned
+  const unitCount = c => units.filter(u => u.country === c).length;               // units on the board
 
   return (
     <div style={{ display:"flex", height:"100vh", overflow:"hidden", background:"#0a0d15", fontFamily:"Georgia, serif", color:"#d4c9a8" }}>
