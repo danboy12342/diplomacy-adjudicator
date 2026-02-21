@@ -1,28 +1,32 @@
 import { useState, useMemo, useCallback, useEffect } from "react";
 import { COL, TEXT_COL, COUNTRIES, T, ADJ } from "./data.js";
 
-// Returns the list of valid destination territories for a given unit
-function getValidMoves(unit) {
-  const adj = ADJ[unit.loc];
-  if (!adj) return [];
-  return unit.type === "A" ? (adj.army || []) : (adj.fleet || []);
-}
+// Helper: Format orders for display
+function formatOrder(order, units, phase) {
+  if (phase === "Adjust") {
+    if (order.type === "Build") return `Build ${order.unitType} in ${order.loc}`;
+    if (order.type === "Disband") return `Disband Unit in ${order.unitLoc}`; // unitLoc stored for display
+    return "Unknown";
+  }
 
-// Converts an order object into a short human-readable string (e.g. "A LON → NTH")
-function formatOrder(order, units) {
   const unit = units.find(u => u.id === order.unitId);
+  // In retreat phase, unit might be in 'dislodged' list passed as units, handle gracefully
   if (!unit) return "";
   const u = `${unit.type} ${unit.loc}`;
+  
   switch (order.type) {
     case "Hold": return `${u} H`;
     case "Move": return `${u} → ${order.to}`;
     case "Support Hold": return `${u} S ${order.supLoc}`;
     case "Support Move": return `${u} S ${order.supLoc} → ${order.supTgt}`;
     case "Convoy": return `${u} C ${order.supLoc} → ${order.to}`;
+    case "Retreat": return `${u} Retreat → ${order.to}`;
+    case "Disband": return `${u} Disband`;
     default: return u;
   }
 }
 
+// Styles
 const SELECT_STYLE = {
   width:"100%", background:"#111827", color:"#d4c9a8",
   border:"1px solid #2e2e4a", borderRadius:"4px",
@@ -30,330 +34,383 @@ const SELECT_STYLE = {
 };
 
 export default function DiplomacyApp() {
-  // Game state from server
+  // Game State
   const [units, setUnits]             = useState([]);
-  const [controllers, setControllers] = useState({});  // territory -> country
+  const [controllers, setControllers] = useState({});
   const [orders, setOrders]           = useState([]);
   const [year, setYear]               = useState(1901);
   const [season, setSeason]           = useState("Spring");
+  const [phase, setPhase]             = useState("Move"); // Move, Retreat, Adjust
+  const [dislodged, setDislodged]     = useState([]);
+  const [scCounts, setScCounts]       = useState({});
 
-  // UI selection state
+  // UI State
   const [selCountry, setSelCountry]   = useState("England");
-  const [selUnitId, setSelUnitId]     = useState(null);
+  const [selUnitId, setSelUnitId]     = useState(null); // Used for Move/Retreat/Disband
+  const [selTerritory, setSelTerritory] = useState(null); // Used for Builds
+  
+  // Form State
   const [orderType, setOrderType]     = useState("Hold");
   const [orderTo, setOrderTo]         = useState("");
   const [orderSupLoc, setOrderSupLoc] = useState("");
   const [orderSupTgt, setOrderSupTgt] = useState("");
+  
   const [hoveredId, setHoveredId]     = useState(null);
   const [tooltip, setTooltip]         = useState(null);
 
-  // Load initial game state on mount
-  useEffect(() => {
-    fetch('/api/state').then(r => r.json()).then(syncState);
-  }, []);
+  // Sync with Server
+  useEffect(() => { fetch('/api/state').then(r => r.json()).then(syncState); }, []);
 
-  // Applies a full state snapshot from the server
   const syncState = (data) => {
     setUnits(data.units); setControllers(data.controllers);
     setOrders(data.orders); setYear(data.year); setSeason(data.season);
+    setPhase(data.phase); setDislodged(data.dislodged || []);
+    setScCounts(data.scCounts || {});
   };
 
-  const selectedUnit = useMemo(() => units.find(u => u.id === selUnitId), [units, selUnitId]);
-  const countryUnits = useMemo(() => units.filter(u => u.country === selCountry), [units, selCountry]);
+  // ─── COMPUTED HELPERS ─────────────────────────────────────────
 
-  // Strict adjacency moves; used for fleet/army move validation
-  const validMoves = useMemo(() => selectedUnit ? getValidMoves(selectedUnit) : [], [selectedUnit]);
+  // Active units based on phase
+  const visibleUnits = useMemo(() => phase === "Retreat" ? dislodged : units, [phase, units, dislodged]);
+  
+  // Selected Unit Object
+  const selectedUnit = useMemo(() => visibleUnits.find(u => u.id === selUnitId), [visibleUnits, selUnitId]);
+  
+  // Units for the selected country (Move/Retreat phase)
+  const countryUnits = useMemo(() => visibleUnits.filter(u => u.country === selCountry), [visibleUnits, selCountry]);
 
-  // For armies, extend options to all land territories (convoy paths included)
-  const possibleMoves = useMemo(() => {
+  // Valid Moves for Selection
+  const validMoves = useMemo(() => {
     if (!selectedUnit) return [];
+    if (phase === "Retreat") {
+      // Logic: Adjacent, but NOT source, and NOT occupied
+      const adj = selectedUnit.type === "A" ? ADJ[selectedUnit.loc].army : ADJ[selectedUnit.loc].fleet;
+      return adj.filter(dest => dest !== selectedUnit.source && !units.some(u => u.loc === dest));
+    }
+    // Phase Move
+    const adj = ADJ[selectedUnit.loc];
+    return selectedUnit.type === "A" ? adj.army : adj.fleet;
+  }, [selectedUnit, phase, units]);
+
+  // Possible moves including convoy destinations (simplified)
+  const possibleMoves = useMemo(() => {
+    if (phase !== "Move" || !selectedUnit) return validMoves;
     if (selectedUnit.type === "A") {
       const landNodes = Object.keys(T).filter(k => T[k].t !== "S" && k !== selectedUnit.loc);
       return [...new Set([...validMoves, ...landNodes])].sort();
     }
     return validMoves;
-  }, [selectedUnit, validMoves]);
+  }, [selectedUnit, validMoves, phase]);
 
-  // Units adjacent to the selected unit (used for support targeting)
+  // Support lists
   const adjUnits = useMemo(() => {
-    if (!selectedUnit) return [];
-    return validMoves
-      .map(loc => ({ loc, unit: units.find(u => u.loc === loc && u.id !== selectedUnit.id) }))
-      .filter(x => x.unit);
-  }, [selectedUnit, validMoves, units]);
+    if (!selectedUnit || phase !== "Move") return [];
+    return validMoves.map(loc => ({ loc, unit: units.find(u => u.loc === loc && u.id !== selectedUnit.id) })).filter(x => x.unit);
+  }, [selectedUnit, validMoves, units, phase]);
 
-  // Valid destinations the supported unit can move to (for Support Move)
   const supMoveTargets = useMemo(() => {
-    if (!selectedUnit || !orderSupLoc) return [];
+    if (!selectedUnit || !orderSupLoc || phase !== "Move") return [];
     const supUnit = units.find(u => u.loc === orderSupLoc);
     if (!supUnit) return [];
-    const supMoves = getValidMoves(supUnit);
+    const supMoves = supUnit.type === "A" ? ADJ[supUnit.loc].army : ADJ[supUnit.loc].fleet;
     return supMoves.filter(t => t !== selectedUnit.loc && validMoves.includes(t));
-  }, [selectedUnit, orderSupLoc, units, validMoves]);
+  }, [selectedUnit, orderSupLoc, units, validMoves, phase]);
 
-  const getOrder = useCallback(uid => orders.find(o => o.unitId === uid), [orders]);
+  // Adjustment logic
+  const adjustmentNeeded = useMemo(() => {
+    if (phase !== "Adjust") return 0;
+    const c = scCounts[selCountry];
+    return c ? c.diff : 0; // + means build, - means disband
+  }, [phase, scCounts, selCountry]);
 
-  // Returns true only when all required fields for the current order type are filled
-  const canAdd = () => {
-    if (!selectedUnit) return false;
-    if (orderType === "Hold") return true;
-    if (orderType === "Move") return !!orderTo;
-    if (orderType === "Support Hold") return !!orderSupLoc;
-    if (orderType === "Support Move") return !!orderSupLoc && !!orderSupTgt;
-    if (orderType === "Convoy") return !!orderSupLoc && !!orderTo;
-    return false;
-  };
+  // ─── ACTIONS ──────────────────────────────────────────────────
 
-  const resetOrderForm = () => { setOrderType("Hold"); setOrderTo(""); setOrderSupLoc(""); setOrderSupTgt(""); };
-
-  // Persists the order list both locally and to the server
   const saveOrders = (newOrders) => {
     setOrders(newOrders);
     fetch('/api/orders', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({orders: newOrders}) });
   };
 
-  // Adds (or replaces) the order for the selected unit, then resets the form
   const addOrder = () => {
-    if (!canAdd()) return;
-    const newOrder = {
-      unitId: selectedUnit.id, type: orderType,
-      to: orderTo || null, supLoc: orderSupLoc || null, supTgt: orderSupTgt || null,
-    };
-    saveOrders([...orders.filter(o => o.unitId !== selectedUnit.id), newOrder]);
-    resetOrderForm();
-  };
+    let newOrder = null;
 
-  const removeOrder = uid => saveOrders(orders.filter(o => o.unitId !== uid));
-  const selectUnit = (unit) => { setSelUnitId(unit.id); setSelCountry(unit.country); resetOrderForm(); };
+    if (phase === "Move") {
+      newOrder = { unitId: selectedUnit.id, type: orderType, to: orderTo || null, supLoc: orderSupLoc || null, supTgt: orderSupTgt || null };
+    } else if (phase === "Retreat") {
+      newOrder = { unitId: selectedUnit.id, type: orderType, to: orderTo || null }; // Type is Retreat or Disband
+    } else if (phase === "Adjust") {
+      // Build
+      if (adjustmentNeeded > 0 && selTerritory) {
+         newOrder = { type: "Build", loc: selTerritory, unitType: orderType, country: selCountry }; // orderType here is "A" or "F"
+         // Dedupe builds on same loc
+         const others = orders.filter(o => o.loc !== selTerritory);
+         saveOrders([...others, newOrder]);
+         setSelTerritory(null);
+         return;
+      }
+      // Disband (via map selection or list)
+      if (adjustmentNeeded < 0 && selectedUnit) {
+         newOrder = { type: "Disband", unitId: selectedUnit.id, unitLoc: selectedUnit.loc };
+      }
+    }
 
-  // Sends current orders to the server for adjudication, then resyncs state
-  const processOrders = () => {
-    fetch('/api/process', { method: 'POST' }).then(r => r.json()).then(data => {
-      syncState(data);
-      setSelUnitId(null);
-      resetOrderForm();
-    });
-  };
-
-  // Confirms before wiping all state back to the starting position
-  const resetGame = () => {
-    if(confirm("Reset game back to 1901?")) {
-      fetch('/api/reset', { method: 'POST' }).then(r => r.json()).then(syncState);
+    if (newOrder) {
+      // Replace existing order for this unit/loc
+      const filtered = orders.filter(o => phase === "Adjust" ? o.unitId !== newOrder.unitId : o.unitId !== newOrder.unitId);
+      saveOrders([...filtered, newOrder]);
+      // Reset form
+      setOrderType("Hold"); setOrderTo(""); setSelTerritory(null); setSelUnitId(null);
     }
   };
 
-  // Returns the SVG fill color for a territory node based on type and ownership
-  const getTerritoryFill = id => {
-    const terr = T[id];
-    if (terr.t === "S") return "#1e3a5c";                              // sea
-    if (terr.sc && controllers[id]) return COL[controllers[id]] || "#b0a070"; // owned SC
-    if (terr.sc) return "#b0a070";                                     // neutral SC
-    return "#8a7a50";                                                  // plain land
+  const removeOrder = (order) => {
+    if (phase === "Adjust" && order.type === "Build") {
+      saveOrders(orders.filter(o => o.loc !== order.loc));
+    } else {
+      saveOrders(orders.filter(o => o.unitId !== order.unitId));
+    }
   };
 
-  const getUnitAt = id => units.find(u => u.loc === id);
-  // Counts how many supply centres a country currently controls
-  const scCount = country => Object.values(controllers).filter(c => c === country).length;
+  const processOrders = () => {
+    fetch('/api/process', { method: 'POST' }).then(r => r.json()).then(d => {
+      syncState(d);
+      setSelUnitId(null); setSelTerritory(null);
+    });
+  };
+
+  const resetGame = () => { if(confirm("Reset game?")) fetch('/api/reset', { method: 'POST' }).then(r => r.json()).then(syncState); };
+
+  // ─── INTERACTION ──────────────────────────────────────────────
+  const handleMapClick = (id) => {
+    const unit = visibleUnits.find(u => u.loc === id);
+    
+    if (phase === "Adjust") {
+      // If we need builds, click empty home centers
+      if (adjustmentNeeded > 0) {
+        if (!unit && T[id].home === selCountry && T[id].sc && controllers[id] === selCountry) {
+          setSelTerritory(id);
+          setSelUnitId(null);
+          setOrderType("A"); // Default build army
+        }
+      }
+      // If we need disbands, click our units
+      if (adjustmentNeeded < 0 && unit && unit.country === selCountry) {
+        setSelUnitId(unit.id);
+        setSelTerritory(null);
+        setOrderType("Disband"); // Auto select disband
+      }
+      return;
+    }
+
+    // Move or Retreat Phases
+    if (unit) {
+      setSelUnitId(unit.id);
+      setSelCountry(unit.country);
+      setOrderType(phase === "Retreat" ? "Retreat" : "Hold");
+      setOrderTo("");
+    }
+  };
+
+  // ─── RENDER HELPERS ───────────────────────────────────────────
+  const getTerritoryFill = id => {
+    const terr = T[id];
+    // Adjust Phase: Highlight buildable slots
+    if (phase === "Adjust" && adjustmentNeeded > 0 && terr.home === selCountry && !units.some(u=>u.loc===id) && controllers[id]===selCountry) return "#44ff44";
+    
+    if (terr.t === "S") return "#1e3a5c";
+    if (terr.sc && controllers[id]) return COL[controllers[id]] || "#b0a070";
+    if (terr.sc) return "#b0a070";
+    return "#8a7a50";
+  };
+  
+  const scCount = c => Object.values(controllers).filter(x => x === c).length;
+  const unitCount = c => units.filter(u => u.country === c).length;
 
   return (
     <div style={{ display:"flex", height:"100vh", overflow:"hidden", background:"#0a0d15", fontFamily:"Georgia, serif", color:"#d4c9a8" }}>
-      {/* ── MAP PANEL ── */}
+      
+      {/* ── MAP ── */}
       <div style={{flex:1, display:"flex", flexDirection:"column", overflow:"hidden"}}>
+        {/* HEADER */}
         <div style={{ padding:"7px 16px", borderBottom:"1px solid #1e2a3a", background:"rgba(10,13,21,0.9)", display:"flex", alignItems:"center", gap:"16px" }}>
-          {/* UPDATED TITLE HERE */}
-          <span style={{ fontSize:"18px", letterSpacing:"4px", color:"#c8a850", fontStyle:"italic" }}>DIPLO-ADJ</span>
-          <span style={{color:"#2e3a4a", fontSize:"14px"}}>—</span>
-          <span style={{fontSize:"13px", color:"#8a9aaa", letterSpacing:"1px"}}>{season} {year}</span>
-          <button onClick={resetGame} style={{ background:"none", border:"1px solid #c0374f", color:"#c0374f", padding:"2px 6px", borderRadius:"3px", cursor:"pointer", marginLeft: "10px", fontSize: "11px"}}>Reset</button>
-          
-          <div style={{marginLeft:"auto", display:"flex", gap:"8px"}}>
-            {COUNTRIES.map(c => (
-              <div key={c} style={{
-                display:"flex", alignItems:"center", gap:"3px", padding:"1px 6px", borderRadius:"3px",
-                background: selCountry === c ? COL[c]+"22" : "transparent", border: selCountry === c ? `1px solid ${COL[c]}66` : "1px solid transparent",
-                cursor:"pointer", fontSize:"11px", color:"#8a9aaa",
-              }} onClick={() => { setSelCountry(c); setSelUnitId(null); resetOrderForm(); }}>
-                <div style={{width:8,height:8,borderRadius:"50%",background:COL[c]}}/>
-                <span>{c.slice(0,3)}</span><span style={{color:COL[c], fontWeight:"bold"}}>{scCount(c)}</span>
-              </div>
-            ))}
-          </div>
+          <span style={{ fontSize:"18px", letterSpacing:"4px", color:"#c8a850", fontStyle:"italic" }}>DIPLOMACY</span>
+          <span style={{color:"#2e3a4a"}}>—</span>
+          <span style={{fontSize:"13px", color:"#fff", letterSpacing:"1px", fontWeight:"bold"}}>
+            {season} {year} <span style={{color:"#f00"}}>({phase.toUpperCase()})</span>
+          </span>
+          <button onClick={resetGame} style={{marginLeft:"auto", background:"none", border:"1px solid #443333", color:"#c0374f", padding:"2px 6px", borderRadius:"3px", cursor:"pointer", fontSize:"10px"}}>RESET</button>
         </div>
 
+        {/* SVG */}
         <div style={{flex:1, overflow:"hidden", position:"relative"}}>
-          <svg width="100%" height="100%" viewBox="0 0 660 480" style={{display:"block", cursor:"default"}}>
-            <defs>
-              <radialGradient id="ocean" cx="40%" cy="40%">
-                <stop offset="0%" stopColor="#1a3a60"/><stop offset="100%" stopColor="#0d1e35"/>
-              </radialGradient>
-              {COUNTRIES.map(c => (
-                <marker key={c} id={`arr-${c}`} markerWidth="6" markerHeight="6" refX="5" refY="2" orient="auto">
-                  <path d="M0,0 L0,4 L6,2 z" fill={COL[c]}/>
-                </marker>
-              ))}
-              <marker id="arr-sup" markerWidth="6" markerHeight="6" refX="5" refY="2" orient="auto">
-                <path d="M0,0 L0,4 L6,2 z" fill="#22d4c8"/>
-              </marker>
+          <svg width="100%" height="100%" viewBox="0 0 660 480">
+             <defs>
+              <radialGradient id="ocean" cx="40%" cy="40%"><stop offset="0%" stopColor="#1a3a60"/><stop offset="100%" stopColor="#0d1e35"/></radialGradient>
+              {COUNTRIES.map(c => <marker key={c} id={`arr-${c}`} markerWidth="6" markerHeight="6" refX="5" refY="2" orient="auto"><path d="M0,0 L0,4 L6,2 z" fill={COL[c]}/></marker>)}
             </defs>
             <rect width="660" height="480" fill="url(#ocean)"/>
-            {selectedUnit && validMoves.map(loc => {
-              const terr = T[loc];
-              if (!terr) return null;
-              return <circle key={`vm-${loc}`} cx={terr.x} cy={terr.y} r={(terr.t==="S"?6:10)+4} fill="none" stroke="#44ff99" strokeWidth={1.5} strokeDasharray="3,2" opacity={0.6}/>
-            })}
-            {orders.filter(o => o.type === "Support Hold" || o.type === "Support Move").map(o => {
-              const from = T[units.find(u => u.id === o.unitId)?.loc], to = T[o.supLoc];
-              return from && to ? <line key={`sl-${o.unitId}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} stroke="#22d4c8" strokeWidth={1.5} strokeDasharray="4,3" markerEnd="url(#arr-sup)" opacity={0.7}/> : null;
-            })}
-            {orders.filter(o => o.type === "Move" && o.to).map(o => {
-              const unit = units.find(u => u.id === o.unitId);
-              const from = T[unit?.loc], to = T[o.to];
-              if (!from || !to) return null;
-              const ux = (to.x - from.x)/(Math.sqrt((to.x-from.x)**2+(to.y-from.y)**2)||1), uy = (to.y - from.y)/(Math.sqrt((to.x-from.x)**2+(to.y-from.y)**2)||1);
-              return <line key={`mo-${o.unitId}`} x1={from.x+ux*16} y1={from.y+uy*16} x2={to.x-ux*16} y2={to.y-uy*16} stroke={COL[unit.country]} strokeWidth={2.5} markerEnd={`url(#arr-${unit.country})`} opacity={0.9}/>;
-            })}
-            {orders.filter(o => o.type === "Convoy" && o.to && o.supLoc).map(o => {
-              const unit = units.find(u => u.id === o.unitId);
-              const from = T[o.supLoc], to = T[o.to];
-              if (!from || !to) return null;
-              const ux = (to.x - from.x)/(Math.sqrt((to.x-from.x)**2+(to.y-from.y)**2)||1), uy = (to.y - from.y)/(Math.sqrt((to.x-from.x)**2+(to.y-from.y)**2)||1);
-              return <line key={`cv-${o.unitId}`} x1={from.x+ux*14} y1={from.y+uy*14} x2={to.x-ux*14} y2={to.y-uy*14} stroke={COL[unit.country]} strokeWidth={2} strokeDasharray="5,3" markerEnd={`url(#arr-${unit.country})`} opacity={0.8}/>
-            })}
+            
+            {/* Draw Connections/Orders/Units */}
             {Object.entries(T).map(([id, terr]) => {
+              const unit = visibleUnits.find(u => u.loc === id);
+              const isSel = selectedUnit?.loc === id || selTerritory === id;
               const isSea = terr.t === "S", r = isSea ? 7 : 10;
-              const unit = getUnitAt(id), isSel = selectedUnit?.loc === id, isHov = hoveredId === id;
+              
               return (
-                <g key={id} onClick={() => { if(unit) selectUnit(unit); }} onMouseEnter={() => { setHoveredId(id); setTooltip({id, terr, unit}); }} onMouseLeave={() => { setHoveredId(null); setTooltip(null); }} style={{cursor: unit ? "pointer" : "default"}}>
-                  <circle cx={terr.x} cy={terr.y} r={r} fill={getTerritoryFill(id)} stroke={isSel ? "#ffee44" : isHov && unit ? "#fff" : isSea ? "#1a4a7a" : "#3a2a10"} strokeWidth={isSel ? 2.5 : 1} opacity={isSea ? 0.55 : 1}/>
-                  {terr.sc && !isSea && <circle cx={terr.x} cy={terr.y} r={1.5} fill="rgba(255,255,255,0.45)"/>}
-                  {unit && (
-                    <>
-                      <circle cx={terr.x} cy={terr.y} r={r-2} fill={COL[unit.country]} stroke={isSel ? "#ffee44" : "#000"} strokeWidth={isSel ? 1.5 : 0.8}/>
+                <g key={id} onClick={() => handleMapClick(id)} 
+                   onMouseEnter={()=>{setHoveredId(id);setTooltip({id,terr,unit})}} 
+                   onMouseLeave={()=>{setHoveredId(null);setTooltip(null)}}
+                   style={{cursor:"pointer"}}>
+                   
+                   <circle cx={terr.x} cy={terr.y} r={r} fill={getTerritoryFill(id)} 
+                     stroke={isSel?"#fff": (isSea?"#1a4a7a":"#3a2a10")} strokeWidth={isSel?2:1} opacity={isSea?0.6:1} />
+                   
+                   {terr.sc && !isSea && <circle cx={terr.x} cy={terr.y} r={1.5} fill="rgba(255,255,255,0.5)"/>}
+                   
+                   {unit && (
+                     <>
+                      <circle cx={terr.x} cy={terr.y} r={r-2} fill={COL[unit.country]} stroke={isSel?"#fff":"#000"} strokeWidth={isSel?1.5:0.5}/>
                       <text x={terr.x} y={terr.y+2.5} textAnchor="middle" fontSize={6} fontWeight="bold" fill={TEXT_COL[unit.country]}>{unit.type}</text>
-                    </>
-                  )}
-                  {unit && !!getOrder(unit.id) && <circle cx={terr.x+r-2} cy={terr.y-r+2} r={3} fill="#ff9922" stroke="#000" strokeWidth={0.5}/>}
-                  {!isSea && <text x={terr.x} y={terr.y+r+8} textAnchor="middle" fontSize={5.5} fill={isHov?"#fff":"#c0b080"} style={{pointerEvents:"none"}}>{id}</text>}
+                     </>
+                   )}
+                   {/* Label */}
+                   {!isSea && <text x={terr.x} y={terr.y+r+8} textAnchor="middle" fontSize={5} fill="#c0b080" style={{pointerEvents:"none"}}>{id}</text>}
                 </g>
-              );
+              )
+            })}
+            
+            {/* Visualize Valid Moves for Selected */}
+            {selectedUnit && phase !== "Adjust" && validMoves.map(m => {
+               const t = T[m];
+               return <circle key={m} cx={t.x} cy={t.y} r={3} fill="#44ff99" opacity={0.5} style={{pointerEvents:"none"}}/>
             })}
           </svg>
+          
+          {/* Tooltip */}
           {tooltip && (
-            <div style={{ position:"absolute", bottom:12, left:12, background:"rgba(8,12,22,0.92)", border:"1px solid #2e3a4a", borderRadius:"4px", padding:"6px 10px", fontSize:"11px", pointerEvents:"none"}}>
-              <div style={{color:"#c8a850", fontWeight:"bold", marginBottom:2}}>{tooltip.terr.n} ({tooltip.id})</div>
-              <div style={{color:"#6a7a8a"}}>{tooltip.terr.t==="S"?"Sea":tooltip.terr.t==="C"?"Coastal":"Inland"}{tooltip.terr.sc?" • Supply Centre":""}</div>
-              {tooltip.unit && <div style={{color:COL[tooltip.unit.country], marginTop:3}}>{tooltip.unit.type} ({tooltip.unit.country})</div>}
-            </div>
+             <div style={{position:"absolute", bottom:10, left:10, background:"rgba(0,0,0,0.8)", padding:"5px", borderRadius:"4px", pointerEvents:"none", fontSize:"11px"}}>
+               <div style={{fontWeight:"bold", color:"#c8a850"}}>{tooltip.terr.n}</div>
+               {tooltip.unit && <div style={{color:COL[tooltip.unit.country]}}>{tooltip.unit.type} ({tooltip.unit.country})</div>}
+             </div>
           )}
         </div>
       </div>
 
-      {/* ── SIDE PANEL ── */}
-      <div style={{ width:290, background:"#080c14", borderLeft:"1px solid #1a2030", display:"flex", flexDirection:"column" }}>
-        <div style={{padding:"10px", borderBottom:"1px solid #1a2030"}}>
-          <div style={{display:"flex", flexWrap:"wrap", gap:"4px"}}>
-            {COUNTRIES.map(c => (
-              <button key={c} onClick={() => { setSelCountry(c); setSelUnitId(null); resetOrderForm(); }}
-                style={{ padding:"3px 8px", fontSize:"11px", fontFamily:"Georgia,serif", background: selCountry===c ? COL[c]+"33" : "transparent",
-                  border: selCountry===c ? `1px solid ${COL[c]}` : "1px solid #1e2a3a", borderRadius:"3px", color: selCountry===c ? COL[c] : "#5a6a7a", cursor:"pointer"
-                }}>{c}</button>
-            ))}
-          </div>
+      {/* ── SIDEBAR ── */}
+      <div style={{ width:300, background:"#080c14", borderLeft:"1px solid #1a2030", display:"flex", flexDirection:"column", padding:"10px", gap:"10px" }}>
+        
+        {/* Country Selector */}
+        <div style={{display:"flex", flexWrap:"wrap", gap:"4px"}}>
+          {COUNTRIES.map(c => (
+            <button key={c} onClick={() => { setSelCountry(c); setSelUnitId(null); setSelTerritory(null); }}
+              style={{ flex:1, padding:"4px", fontSize:"10px", background: selCountry===c?COL[c]+"44":"#111", border:`1px solid ${selCountry===c?COL[c]:"#333"}`, color: selCountry===c?COL[c]:"#666", cursor:"pointer" }}>
+              {c.slice(0,3)}
+            </button>
+          ))}
         </div>
 
-        <div style={{padding:"10px", borderBottom:"1px solid #1a2030"}}>
-          <div style={{display:"flex", justifyContent:"space-between", marginBottom:"7px"}}>
-            <span style={{fontSize:"9px",color:"#4a5a6a",textTransform:"uppercase"}}>{selCountry} Units</span>
-            <span style={{fontSize:"10px",color:"#c8a850"}}>{scCount(selCountry)} SC</span>
-          </div>
-          {countryUnits.map(unit => {
-            const ord = getOrder(unit.id), isSel = selUnitId === unit.id;
-            return (
-              <button key={unit.id} onClick={() => selectUnit(unit)} style={{ display:"flex", alignItems:"center", width:"100%", padding:"5px 8px", marginBottom:"3px", background: isSel ? COL[selCountry]+"1a" : "transparent", border: isSel ? `1px solid ${COL[selCountry]}66` : "1px solid #151e2a", borderRadius:"4px", cursor:"pointer", textAlign:"left"}}>
-                <div style={{ width:20, height:20, borderRadius:"50%", background:COL[unit.country], color:TEXT_COL[unit.country], display:"flex", alignItems:"center", justifyContent:"center", fontSize:"9px", fontWeight:"bold", marginRight:8 }}>{unit.type}</div>
-                <div style={{flex:1}}>
-                  <div style={{fontSize:"12px", color:"#d4c9a8"}}>{T[unit.loc]?.n}</div>
-                  <div style={{fontSize:"10px", color:"#4a5a6a"}}>{unit.loc}</div>
-                </div>
-                {ord && <div style={{fontSize:"10px", color:"#ff9922", fontFamily:"monospace"}}>{ord.type==="Move"?`→${ord.to}`:ord.type==="Hold"?"H":ord.type==="Convoy"?"C":"S"}</div>}
-              </button>
-            );
-          })}
+        {/* Phase Info */}
+        <div style={{background:"#111", padding:"8px", borderRadius:"4px", fontSize:"11px", color:"#aaa"}}>
+          <div>Phase: <span style={{color:"#fff"}}>{phase}</span></div>
+          {phase === "Adjust" && scCounts[selCountry] && (
+             <div style={{marginTop:4}}>
+               Units: {scCounts[selCountry].units} | SCs: {scCounts[selCountry].scs} | 
+               <span style={{color: adjustmentNeeded > 0 ? "#4f4" : adjustmentNeeded < 0 ? "#f44" : "#fff", fontWeight:"bold"}}>
+                 {adjustmentNeeded > 0 ? ` Build ${adjustmentNeeded}` : adjustmentNeeded < 0 ? ` Disband ${Math.abs(adjustmentNeeded)}` : " Balanced"}
+               </span>
+             </div>
+          )}
         </div>
 
-        <div style={{padding:"10px", borderBottom:"1px solid #1a2030", minHeight:0}}>
-          {selectedUnit ? (
-            <>
-              <div style={{marginBottom:7}}>
-                <select value={orderType} onChange={e => { setOrderType(e.target.value); setOrderTo(""); setOrderSupLoc(""); setOrderSupTgt(""); }} style={SELECT_STYLE}>
-                  <option value="Hold">Hold</option><option value="Move">Move</option><option value="Support Hold">Support Hold</option><option value="Support Move">Support Move</option>
-                  {selectedUnit.type === "F" && T[selectedUnit.loc]?.t === "S" && <option value="Convoy">Convoy</option>}
-                </select>
-              </div>
-              {orderType === "Move" && (
-                <div style={{marginBottom:7}}>
-                  <select value={orderTo} onChange={e => setOrderTo(e.target.value)} style={SELECT_STYLE}>
-                    <option value="">— choose destination —</option>
-                    {possibleMoves.map(loc => <option key={loc} value={loc}>{loc} — {T[loc]?.n}</option>)}
-                  </select>
-                </div>
-              )}
-              {(orderType === "Support Hold" || orderType === "Support Move") && (
-                <div style={{marginBottom:7}}>
-                  <select value={orderSupLoc} onChange={e => { setOrderSupLoc(e.target.value); setOrderSupTgt(""); }} style={SELECT_STYLE}>
-                    <option value="">— choose unit to support —</option>
-                    {adjUnits.map(({loc, unit}) => <option key={loc} value={loc}>{loc} — {unit.type} ({unit.country.slice(0,3)})</option>)}
-                  </select>
-                </div>
-              )}
-              {orderType === "Support Move" && orderSupLoc && (
-                <div style={{marginBottom:7}}>
-                  <select value={orderSupTgt} onChange={e => setOrderSupTgt(e.target.value)} style={SELECT_STYLE}>
-                    <option value="">— support attack to —</option>
-                    {supMoveTargets.map(loc => <option key={loc} value={loc}>{loc} — {T[loc]?.n}</option>)}
-                  </select>
-                </div>
-              )}
-              {orderType === "Convoy" && (
-                <>
-                  <select value={orderSupLoc} onChange={e => setOrderSupLoc(e.target.value)} style={{...SELECT_STYLE, marginBottom:7}}>
-                    <option value="">— choose army to convoy —</option>
-                    {validMoves.map(loc => { const u = units.find(u => u.loc === loc && u.type === "A"); return u ? <option key={loc} value={loc}>{loc} — A ({u.country.slice(0,3)})</option> : null; })}
-                  </select>
-                  <select value={orderTo} onChange={e => setOrderTo(e.target.value)} style={SELECT_STYLE}>
-                    <option value="">— convoy destination —</option>
-                    {Object.keys(T).filter(k => T[k].t !== "S" && k !== orderSupLoc).map(loc => <option key={loc} value={loc}>{loc} — {T[loc].n}</option>)}
-                  </select>
-                </>
-              )}
-              <button onClick={addOrder} disabled={!canAdd()} style={{ width:"100%", padding:"7px", marginTop:2, background: canAdd() ? "#1a3a1a" : "#111", color: canAdd() ? "#6ad46a" : "#3a4a3a", border: `1px solid ${canAdd() ? "#3a6a3a" : "#1a2a1a"}`, borderRadius:"4px", cursor: canAdd() ? "pointer" : "default", fontSize:"12px" }}>Set Order</button>
-            </>
-          ) : <div style={{padding:"16px", textAlign:"center", color:"#2a3a4a", fontSize:"12px", fontStyle:"italic"}}>Select a unit</div>}
+        {/* Action Panel */}
+        <div style={{background:"#0e121a", padding:"10px", borderRadius:"4px", border:"1px solid #222"}}>
+          {phase === "Adjust" ? (
+             /* ADJUSTMENT CONTROLS */
+             <div>
+               <div style={{fontSize:"10px", marginBottom:5, color:"#666", textTransform:"uppercase"}}>Adjustment Orders</div>
+               {adjustmentNeeded > 0 && selTerritory ? (
+                  <>
+                    <div style={{fontSize:"12px", color:"#fff", marginBottom:5}}>Build in {T[selTerritory].n}</div>
+                    <select style={SELECT_STYLE} value={orderType} onChange={e=>setOrderType(e.target.value)}>
+                      <option value="A">Army</option><option value="F">Fleet</option>
+                    </select>
+                    <button onClick={addOrder} style={{marginTop:8, width:"100%", background:"#242", color:"#afa", border:"none", padding:6, cursor:"pointer"}}>Confirm Build</button>
+                  </>
+               ) : adjustmentNeeded < 0 && selectedUnit ? (
+                  <>
+                     <div style={{fontSize:"12px", color:"#fff", marginBottom:5}}>Disband {selectedUnit.type} in {selectedUnit.loc}</div>
+                     <button onClick={addOrder} style={{marginTop:8, width:"100%", background:"#422", color:"#faa", border:"none", padding:6, cursor:"pointer"}}>Confirm Disband</button>
+                  </>
+               ) : <div style={{fontSize:"11px", fontStyle:"italic", color:"#444"}}>Select Map Location to Act</div>}
+             </div>
+          ) : (
+             /* MOVE / RETREAT CONTROLS */
+             <div>
+               <div style={{fontSize:"10px", marginBottom:5, color:"#666", textTransform:"uppercase"}}>
+                 {selectedUnit ? `${selectedUnit.type} in ${selectedUnit.loc}` : "Select Unit"}
+               </div>
+               
+               {selectedUnit && (
+                 <>
+                   <select style={SELECT_STYLE} value={orderType} onChange={e=>{setOrderType(e.target.value); setOrderTo("");}}>
+                     {phase === "Move" ? (
+                       <>
+                        <option value="Hold">Hold</option><option value="Move">Move</option>
+                        <option value="Support Hold">Support Hold</option><option value="Support Move">Support Move</option>
+                        {selectedUnit.type === "F" && <option value="Convoy">Convoy</option>}
+                       </>
+                     ) : (
+                       <>
+                        <option value="Retreat">Retreat</option><option value="Disband">Disband</option>
+                       </>
+                     )}
+                   </select>
+
+                   {/* MOVE / RETREAT DESTINATION */}
+                   {(orderType === "Move" || orderType === "Retreat" || orderType === "Convoy") && (
+                     <select style={{...SELECT_STYLE, marginTop:5}} value={orderTo} onChange={e=>setOrderTo(e.target.value)}>
+                       <option value="">Dest...</option>
+                       {(orderType==="Convoy" || orderType==="Move" ? possibleMoves : validMoves).map(m => <option key={m} value={m}>{m} ({T[m].n})</option>)}
+                     </select>
+                   )}
+
+                   {/* SUPPORT TARGETS */}
+                   {(orderType.startsWith("Support") || orderType==="Convoy") && (
+                     <select style={{...SELECT_STYLE, marginTop:5}} value={orderSupLoc} onChange={e=>setOrderSupLoc(e.target.value)}>
+                       <option value="">Unit to {orderType==="Convoy"?"Convoy":"Support"}...</option>
+                       {(orderType==="Convoy" ? units.filter(u=>u.type==="A") : adjUnits).map(u => (
+                         <option key={u.loc || u.unit.loc} value={u.loc || u.unit.loc}>{u.loc || u.unit.loc}</option>
+                       ))}
+                     </select>
+                   )}
+                   
+                   {orderType === "Support Move" && (
+                      <select style={{...SELECT_STYLE, marginTop:5}} value={orderSupTgt} onChange={e=>setOrderSupTgt(e.target.value)}>
+                        <option value="">Into...</option>
+                        {supMoveTargets.map(t => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                   )}
+
+                   <button onClick={addOrder} style={{marginTop:10, width:"100%", padding:6, background:"#223", color:"#aac", border:"1px solid #334", cursor:"pointer"}}>Enter Order</button>
+                 </>
+               )}
+             </div>
+          )}
         </div>
 
-        <div style={{flex:1, overflow:"auto", padding:"10px"}}>
-          <div style={{display:"flex",justifyContent:"space-between",marginBottom:7}}>
-            <span style={{fontSize:"9px",color:"#4a5a6a"}}>ORDERS ({orders.length})</span>
-            {orders.length > 0 && <button onClick={() => saveOrders([])} style={{background:"none",border:"none",color:"#6a4a4a",cursor:"pointer",fontSize:"10px"}}>Clear</button>}
-          </div>
-          {orders.map(order => {
-            const unit = units.find(u => u.id === order.unitId);
-            return unit ? (
-              <div key={order.unitId} style={{ display:"flex", padding:"4px 7px", marginBottom:3, background:"#0d121e", border:"1px solid #1a2030", borderRadius:"3px"}}>
-                <div style={{flex:1, fontSize:"11px", fontFamily:"monospace", color:"#c0b080"}}>{formatOrder(order, units)}</div>
-                <button onClick={() => removeOrder(order.unitId)} style={{color:"#4a3a3a", background:"none", border:"none", cursor:"pointer"}}>×</button>
-              </div>
-            ) : null;
-          })}
+        {/* Order List */}
+        <div style={{flex:1, overflowY:"auto", background:"#0a0e14", padding:5}}>
+           {orders.map((o, i) => (
+             <div key={i} style={{display:"flex", justifyContent:"space-between", fontSize:"11px", padding:"3px", borderBottom:"1px solid #222", color:"#ccc"}}>
+               <span>{formatOrder(o, phase==="Retreat"?dislodged:units, phase)}</span>
+               <span onClick={()=>removeOrder(o)} style={{cursor:"pointer", color:"#666"}}>x</span>
+             </div>
+           ))}
         </div>
 
-        <div style={{padding:"10px", borderTop:"1px solid #1a2030"}}>
-          <button onClick={processOrders} style={{ width:"100%", padding:"9px", background:"#0e1e3a", color:"#6a9ad8", border:"1px solid #1e3a6a", borderRadius:"4px", cursor:"pointer", fontSize:"13px" }}>
-            Resolve Orders (Automated) →
-          </button>
-          {/* UPDATED FOOTER HERE */}
-          <div style={{marginTop:"8px", textAlign:"center", fontSize:"9px", color:"#0d74db", fontFamily:"monospace", letterSpacing:"1px", textTransform:"uppercase"}}>daniel shengyi</div>
-        </div>
+        <button onClick={processOrders} style={{padding:12, background:"#135", color:"#fff", border:"none", fontWeight:"bold", cursor:"pointer"}}>
+          RESOLVE {phase.toUpperCase()}
+        </button>
+
       </div>
     </div>
   );
