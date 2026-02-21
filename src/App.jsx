@@ -1,12 +1,14 @@
 import { useState, useMemo, useCallback, useEffect } from "react";
 import { COL, TEXT_COL, COUNTRIES, T, ADJ } from "./data.js";
 
+// Returns the list of valid destination territories for a given unit
 function getValidMoves(unit) {
   const adj = ADJ[unit.loc];
   if (!adj) return [];
   return unit.type === "A" ? (adj.army || []) : (adj.fleet || []);
 }
 
+// Converts an order object into a short human-readable string (e.g. "A LON → NTH")
 function formatOrder(order, units) {
   const unit = units.find(u => u.id === order.unitId);
   if (!unit) return "";
@@ -28,12 +30,14 @@ const SELECT_STYLE = {
 };
 
 export default function DiplomacyApp() {
+  // Game state from server
   const [units, setUnits]             = useState([]);
-  const [controllers, setControllers] = useState({});
+  const [controllers, setControllers] = useState({});  // territory -> country
   const [orders, setOrders]           = useState([]);
   const [year, setYear]               = useState(1901);
   const [season, setSeason]           = useState("Spring");
 
+  // UI selection state
   const [selCountry, setSelCountry]   = useState("England");
   const [selUnitId, setSelUnitId]     = useState(null);
   const [orderType, setOrderType]     = useState("Hold");
@@ -43,10 +47,12 @@ export default function DiplomacyApp() {
   const [hoveredId, setHoveredId]     = useState(null);
   const [tooltip, setTooltip]         = useState(null);
 
+  // Load initial game state on mount
   useEffect(() => {
     fetch('/api/state').then(r => r.json()).then(syncState);
   }, []);
 
+  // Applies a full state snapshot from the server
   const syncState = (data) => {
     setUnits(data.units); setControllers(data.controllers);
     setOrders(data.orders); setYear(data.year); setSeason(data.season);
@@ -55,7 +61,10 @@ export default function DiplomacyApp() {
   const selectedUnit = useMemo(() => units.find(u => u.id === selUnitId), [units, selUnitId]);
   const countryUnits = useMemo(() => units.filter(u => u.country === selCountry), [units, selCountry]);
 
+  // Strict adjacency moves; used for fleet/army move validation
   const validMoves = useMemo(() => selectedUnit ? getValidMoves(selectedUnit) : [], [selectedUnit]);
+
+  // For armies, extend options to all land territories (convoy paths included)
   const possibleMoves = useMemo(() => {
     if (!selectedUnit) return [];
     if (selectedUnit.type === "A") {
@@ -65,6 +74,7 @@ export default function DiplomacyApp() {
     return validMoves;
   }, [selectedUnit, validMoves]);
 
+  // Units adjacent to the selected unit (used for support targeting)
   const adjUnits = useMemo(() => {
     if (!selectedUnit) return [];
     return validMoves
@@ -72,6 +82,7 @@ export default function DiplomacyApp() {
       .filter(x => x.unit);
   }, [selectedUnit, validMoves, units]);
 
+  // Valid destinations the supported unit can move to (for Support Move)
   const supMoveTargets = useMemo(() => {
     if (!selectedUnit || !orderSupLoc) return [];
     const supUnit = units.find(u => u.loc === orderSupLoc);
@@ -82,6 +93,7 @@ export default function DiplomacyApp() {
 
   const getOrder = useCallback(uid => orders.find(o => o.unitId === uid), [orders]);
 
+  // Returns true only when all required fields for the current order type are filled
   const canAdd = () => {
     if (!selectedUnit) return false;
     if (orderType === "Hold") return true;
@@ -94,11 +106,13 @@ export default function DiplomacyApp() {
 
   const resetOrderForm = () => { setOrderType("Hold"); setOrderTo(""); setOrderSupLoc(""); setOrderSupTgt(""); };
 
+  // Persists the order list both locally and to the server
   const saveOrders = (newOrders) => {
     setOrders(newOrders);
     fetch('/api/orders', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({orders: newOrders}) });
   };
 
+  // Adds (or replaces) the order for the selected unit, then resets the form
   const addOrder = () => {
     if (!canAdd()) return;
     const newOrder = {
@@ -112,6 +126,7 @@ export default function DiplomacyApp() {
   const removeOrder = uid => saveOrders(orders.filter(o => o.unitId !== uid));
   const selectUnit = (unit) => { setSelUnitId(unit.id); setSelCountry(unit.country); resetOrderForm(); };
 
+  // Sends current orders to the server for adjudication, then resyncs state
   const processOrders = () => {
     fetch('/api/process', { method: 'POST' }).then(r => r.json()).then(data => {
       syncState(data);
@@ -120,21 +135,24 @@ export default function DiplomacyApp() {
     });
   };
 
+  // Confirms before wiping all state back to the starting position
   const resetGame = () => {
     if(confirm("Reset game back to 1901?")) {
       fetch('/api/reset', { method: 'POST' }).then(r => r.json()).then(syncState);
     }
   };
 
+  // Returns the SVG fill color for a territory node based on type and ownership
   const getTerritoryFill = id => {
     const terr = T[id];
-    if (terr.t === "S") return "#1e3a5c";
-    if (terr.sc && controllers[id]) return COL[controllers[id]] || "#b0a070";
-    if (terr.sc) return "#b0a070";
-    return "#8a7a50";
+    if (terr.t === "S") return "#1e3a5c";                              // sea
+    if (terr.sc && controllers[id]) return COL[controllers[id]] || "#b0a070"; // owned SC
+    if (terr.sc) return "#b0a070";                                     // neutral SC
+    return "#8a7a50";                                                  // plain land
   };
 
   const getUnitAt = id => units.find(u => u.loc === id);
+  // Counts how many supply centres a country currently controls
   const scCount = country => Object.values(controllers).filter(c => c === country).length;
 
   return (

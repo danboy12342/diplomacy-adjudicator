@@ -3,14 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" href="/favicon.ico" />
+    <!-- Ensures proper scaling on mobile/tablet -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Diplomacy Local Adjudicator</title>
+    <!-- Minimal baseline styles; the app handles the rest via inline styles -->
     <style>
       body { margin: 0; padding: 0; background: #0a0d15; }
     </style>
   </head>
   <body>
+    <!-- React mounts the full app here -->
     <div id="root"></div>
+    <!-- Entry point — Vite resolves and bundles from here -->
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
