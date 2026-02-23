@@ -78,7 +78,6 @@ export default function DiplomacyApp() {
     const node = ADJ[selectedUnit.loc];
     if (!node) return [];
     
-    // Safety check for empty adjacency arrays
     const adjList = selectedUnit.type === "A" ? node.army : node.fleet;
     const safeAdj = adjList || [];
 
@@ -158,8 +157,13 @@ export default function DiplomacyApp() {
     }
   };
 
+  // CRITICAL FIX: Send local orders inside the process request to bypass network lag race conditions
   const processOrders = () => {
-    fetch('/api/process', { method: 'POST' }).then(r => r.json()).then(d => {
+    fetch('/api/process', { 
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ orders }) 
+    }).then(r => r.json()).then(d => {
       syncState(d);
       setSelUnitId(null); setSelTerritory(null);
     }).catch(console.error);

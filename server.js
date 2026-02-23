@@ -205,10 +205,12 @@ function processAdjustPhase() {
   const { orders, units } = state;
   let newUnits = [...units];
   
+  // 1. Disbands
   const disbands = orders.filter(o => o.type === 'Disband');
   const disbandIds = disbands.map(o => o.unitId);
   newUnits = newUnits.filter(u => !disbandIds.includes(u.id));
 
+  // 2. Builds
   const builds = orders.filter(o => o.type === 'Build');
   builds.forEach(b => {
      const isOccupied = newUnits.some(u => u.loc === b.loc);
@@ -282,6 +284,11 @@ app.post('/api/orders', (req, res) => {
 });
 
 app.post('/api/process', (req, res) => {
+  // CRITICAL FIX: Guarantee that the backend processes the exact orders the frontend currently holds!
+  if (req.body && req.body.orders) {
+    state.orders = req.body.orders;
+  }
+
   if (state.phase === "Move") processMovePhase();
   else if (state.phase === "Retreat") processRetreatPhase();
   else if (state.phase === "Adjust") processAdjustPhase();
@@ -309,6 +316,5 @@ app.post('/api/reset', (req, res) => {
 app.use(express.static(path.join(__dirname, 'dist')));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
 
-// CRITICAL FIX FOR RENDER: Use process.env.PORT
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Diplomacy Adjudicator running on ${PORT}`));
