@@ -1,17 +1,15 @@
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { COL, TEXT_COL, COUNTRIES, T, ADJ } from "./data.js";
 
 // Helper: Format orders for display
-// Handles all three phases (Move, Retreat, Adjust) so the order list always shows readable text
 function formatOrder(order, units, phase) {
   if (phase === "Adjust") {
     if (order.type === "Build") return `Build ${order.unitType} in ${order.loc}`;
-    if (order.type === "Disband") return `Disband Unit in ${order.unitLoc}`; // unitLoc stored for display
+    if (order.type === "Disband") return `Disband Unit in ${order.unitLoc}`;
     return "Unknown";
   }
 
   const unit = units.find(u => u.id === order.unitId);
-  // In retreat phase, unit might be in 'dislodged' list passed as units, handle gracefully
   if (!unit) return "";
   const u = `${unit.type} ${unit.loc}`;
   
@@ -41,14 +39,14 @@ export default function DiplomacyApp() {
   const [orders, setOrders]           = useState([]);
   const [year, setYear]               = useState(1901);
   const [season, setSeason]           = useState("Spring");
-  const [phase, setPhase]             = useState("Move"); // Move, Retreat, Adjust
+  const [phase, setPhase]             = useState("Move");
   const [dislodged, setDislodged]     = useState([]);
   const [scCounts, setScCounts]       = useState({});
 
   // UI State
   const [selCountry, setSelCountry]   = useState("England");
-  const [selUnitId, setSelUnitId]     = useState(null); // Used for Move/Retreat/Disband
-  const [selTerritory, setSelTerritory] = useState(null); // Used for Builds
+  const [selUnitId, setSelUnitId]     = useState(null); 
+  const [selTerritory, setSelTerritory] = useState(null); 
   
   // Form State
   const [orderType, setOrderType]     = useState("Hold");
@@ -59,42 +57,37 @@ export default function DiplomacyApp() {
   const [hoveredId, setHoveredId]     = useState(null);
   const [tooltip, setTooltip]         = useState(null);
 
-  // Sync with Server
-  useEffect(() => { fetch('/api/state').then(r => r.json()).then(syncState); }, []);
+  useEffect(() => { fetch('/api/state').then(r => r.json()).then(syncState).catch(console.error); }, []);
 
-  // Merges a full server snapshot into local React state
   const syncState = (data) => {
-    setUnits(data.units); setControllers(data.controllers);
-    setOrders(data.orders); setYear(data.year); setSeason(data.season);
-    setPhase(data.phase); setDislodged(data.dislodged || []);
+    setUnits(data.units || []); 
+    setControllers(data.controllers || {});
+    setOrders(data.orders || []); 
+    setYear(data.year); 
+    setSeason(data.season);
+    setPhase(data.phase); 
+    setDislodged(data.dislodged || []);
     setScCounts(data.scCounts || {});
   };
 
-  // ─── COMPUTED HELPERS ─────────────────────────────────────────
-
-  // Active units based on phase
   const visibleUnits = useMemo(() => phase === "Retreat" ? dislodged : units, [phase, units, dislodged]);
-  
-  // Selected Unit Object
   const selectedUnit = useMemo(() => visibleUnits.find(u => u.id === selUnitId), [visibleUnits, selUnitId]);
   
-  // Units for the selected country (Move/Retreat phase)
-  const countryUnits = useMemo(() => visibleUnits.filter(u => u.country === selCountry), [visibleUnits, selCountry]);
-
-  // Valid Moves for Selection
   const validMoves = useMemo(() => {
     if (!selectedUnit) return [];
+    const node = ADJ[selectedUnit.loc];
+    if (!node) return [];
+    
+    // Safety check for empty adjacency arrays
+    const adjList = selectedUnit.type === "A" ? node.army : node.fleet;
+    const safeAdj = adjList || [];
+
     if (phase === "Retreat") {
-      // Logic: Adjacent, but NOT source, and NOT occupied
-      const adj = selectedUnit.type === "A" ? ADJ[selectedUnit.loc].army : ADJ[selectedUnit.loc].fleet;
-      return adj.filter(dest => dest !== selectedUnit.source && !units.some(u => u.loc === dest));
+      return safeAdj.filter(dest => dest !== selectedUnit.source && !units.some(u => u.loc === dest));
     }
-    // Phase Move
-    const adj = ADJ[selectedUnit.loc];
-    return selectedUnit.type === "A" ? adj.army : adj.fleet;
+    return safeAdj;
   }, [selectedUnit, phase, units]);
 
-  // Possible moves including convoy destinations (simplified)
   const possibleMoves = useMemo(() => {
     if (phase !== "Move" || !selectedUnit) return validMoves;
     if (selectedUnit.type === "A") {
@@ -104,7 +97,6 @@ export default function DiplomacyApp() {
     return validMoves;
   }, [selectedUnit, validMoves, phase]);
 
-  // Support lists
   const adjUnits = useMemo(() => {
     if (!selectedUnit || phase !== "Move") return [];
     return validMoves.map(loc => ({ loc, unit: units.find(u => u.loc === loc && u.id !== selectedUnit.id) })).filter(x => x.unit);
@@ -114,59 +106,50 @@ export default function DiplomacyApp() {
     if (!selectedUnit || !orderSupLoc || phase !== "Move") return [];
     const supUnit = units.find(u => u.loc === orderSupLoc);
     if (!supUnit) return [];
-    const supMoves = supUnit.type === "A" ? ADJ[supUnit.loc].army : ADJ[supUnit.loc].fleet;
+    
+    const node = ADJ[supUnit.loc];
+    const supMoves = (supUnit.type === "A" ? node.army : node.fleet) || [];
     return supMoves.filter(t => t !== selectedUnit.loc && validMoves.includes(t));
   }, [selectedUnit, orderSupLoc, units, validMoves, phase]);
 
-  // Adjustment logic
   const adjustmentNeeded = useMemo(() => {
     if (phase !== "Adjust") return 0;
     const c = scCounts[selCountry];
-    return c ? c.diff : 0; // + means build, - means disband
+    return c ? c.diff : 0; 
   }, [phase, scCounts, selCountry]);
 
-  // ─── ACTIONS ──────────────────────────────────────────────────
-
-  // Persists orders locally and pushes them to the server
   const saveOrders = (newOrders) => {
     setOrders(newOrders);
     fetch('/api/orders', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({orders: newOrders}) });
   };
 
-  // Constructs and saves an order based on the current phase and form values
   const addOrder = () => {
     let newOrder = null;
 
     if (phase === "Move") {
       newOrder = { unitId: selectedUnit.id, type: orderType, to: orderTo || null, supLoc: orderSupLoc || null, supTgt: orderSupTgt || null };
     } else if (phase === "Retreat") {
-      newOrder = { unitId: selectedUnit.id, type: orderType, to: orderTo || null }; // Type is Retreat or Disband
+      newOrder = { unitId: selectedUnit.id, type: orderType, to: orderTo || null }; 
     } else if (phase === "Adjust") {
-      // Build
       if (adjustmentNeeded > 0 && selTerritory) {
-         newOrder = { type: "Build", loc: selTerritory, unitType: orderType, country: selCountry }; // orderType here is "A" or "F"
-         // Dedupe builds on same loc
+         newOrder = { type: "Build", loc: selTerritory, unitType: orderType, country: selCountry }; 
          const others = orders.filter(o => o.loc !== selTerritory);
          saveOrders([...others, newOrder]);
          setSelTerritory(null);
          return;
       }
-      // Disband (via map selection or list)
       if (adjustmentNeeded < 0 && selectedUnit) {
          newOrder = { type: "Disband", unitId: selectedUnit.id, unitLoc: selectedUnit.loc };
       }
     }
 
     if (newOrder) {
-      // Replace existing order for this unit/loc
       const filtered = orders.filter(o => phase === "Adjust" ? o.unitId !== newOrder.unitId : o.unitId !== newOrder.unitId);
       saveOrders([...filtered, newOrder]);
-      // Reset form
       setOrderType("Hold"); setOrderTo(""); setSelTerritory(null); setSelUnitId(null);
     }
   };
 
-  // Removes an order — builds are keyed by loc, all other orders by unitId
   const removeOrder = (order) => {
     if (phase === "Adjust" && order.type === "Build") {
       saveOrders(orders.filter(o => o.loc !== order.loc));
@@ -175,40 +158,34 @@ export default function DiplomacyApp() {
     }
   };
 
-  // Sends orders to the server for adjudication and resyncs the resulting state
   const processOrders = () => {
     fetch('/api/process', { method: 'POST' }).then(r => r.json()).then(d => {
       syncState(d);
       setSelUnitId(null); setSelTerritory(null);
-    });
+    }).catch(console.error);
   };
 
-  // Confirms before wiping all state back to 1901
   const resetGame = () => { if(confirm("Reset game?")) fetch('/api/reset', { method: 'POST' }).then(r => r.json()).then(syncState); };
 
-  // ─── INTERACTION ──────────────────────────────────────────────
   const handleMapClick = (id) => {
     const unit = visibleUnits.find(u => u.loc === id);
     
     if (phase === "Adjust") {
-      // If we need builds, click empty home centers
       if (adjustmentNeeded > 0) {
         if (!unit && T[id].home === selCountry && T[id].sc && controllers[id] === selCountry) {
           setSelTerritory(id);
           setSelUnitId(null);
-          setOrderType("A"); // Default build army
+          setOrderType("A"); 
         }
       }
-      // If we need disbands, click our units
       if (adjustmentNeeded < 0 && unit && unit.country === selCountry) {
         setSelUnitId(unit.id);
         setSelTerritory(null);
-        setOrderType("Disband"); // Auto select disband
+        setOrderType("Disband"); 
       }
       return;
     }
 
-    // Move or Retreat Phases
     if (unit) {
       setSelUnitId(unit.id);
       setSelCountry(unit.country);
@@ -217,21 +194,14 @@ export default function DiplomacyApp() {
     }
   };
 
-  // ─── RENDER HELPERS ───────────────────────────────────────────
-  // Returns SVG fill colour for a territory; highlights buildable slots in Adjust phase
   const getTerritoryFill = id => {
     const terr = T[id];
-    // Adjust Phase: Highlight buildable slots
     if (phase === "Adjust" && adjustmentNeeded > 0 && terr.home === selCountry && !units.some(u=>u.loc===id) && controllers[id]===selCountry) return "#44ff44";
-    
     if (terr.t === "S") return "#1e3a5c";
     if (terr.sc && controllers[id]) return COL[controllers[id]] || "#b0a070";
     if (terr.sc) return "#b0a070";
     return "#8a7a50";
   };
-  
-  const scCount = c => Object.values(controllers).filter(x => x === c).length;   // supply centres owned
-  const unitCount = c => units.filter(u => u.country === c).length;               // units on the board
 
   return (
     <div style={{ display:"flex", height:"100vh", overflow:"hidden", background:"#0a0d15", fontFamily:"Georgia, serif", color:"#d4c9a8" }}>
@@ -240,7 +210,7 @@ export default function DiplomacyApp() {
       <div style={{flex:1, display:"flex", flexDirection:"column", overflow:"hidden"}}>
         {/* HEADER */}
         <div style={{ padding:"7px 16px", borderBottom:"1px solid #1e2a3a", background:"rgba(10,13,21,0.9)", display:"flex", alignItems:"center", gap:"16px" }}>
-          <span style={{ fontSize:"18px", letterSpacing:"4px", color:"#c8a850", fontStyle:"italic" }}>DIPLOMACY</span>
+          <span style={{ fontSize:"18px", letterSpacing:"4px", color:"#c8a850", fontStyle:"italic" }}>DIPLO-ADJ</span>
           <span style={{color:"#2e3a4a"}}>—</span>
           <span style={{fontSize:"13px", color:"#fff", letterSpacing:"1px", fontWeight:"bold"}}>
             {season} {year} <span style={{color:"#f00"}}>({phase.toUpperCase()})</span>
@@ -257,7 +227,6 @@ export default function DiplomacyApp() {
             </defs>
             <rect width="660" height="480" fill="url(#ocean)"/>
             
-            {/* Draw Connections/Orders/Units */}
             {Object.entries(T).map(([id, terr]) => {
               const unit = visibleUnits.find(u => u.loc === id);
               const isSel = selectedUnit?.loc === id || selTerritory === id;
@@ -280,20 +249,18 @@ export default function DiplomacyApp() {
                       <text x={terr.x} y={terr.y+2.5} textAnchor="middle" fontSize={6} fontWeight="bold" fill={TEXT_COL[unit.country]}>{unit.type}</text>
                      </>
                    )}
-                   {/* Label */}
-                   {!isSea && <text x={terr.x} y={terr.y+r+8} textAnchor="middle" fontSize={5} fill="#c0b080" style={{pointerEvents:"none"}}>{id}</text>}
+                   {!isSea && <text x={terr.x} y={terr.y+r+8} textAnchor="middle" fontSize={5.5} fill="#c0b080" style={{pointerEvents:"none"}}>{id}</text>}
                 </g>
               )
             })}
             
-            {/* Visualize Valid Moves for Selected */}
             {selectedUnit && phase !== "Adjust" && validMoves.map(m => {
                const t = T[m];
+               if (!t) return null;
                return <circle key={m} cx={t.x} cy={t.y} r={3} fill="#44ff99" opacity={0.5} style={{pointerEvents:"none"}}/>
             })}
           </svg>
           
-          {/* Tooltip */}
           {tooltip && (
              <div style={{position:"absolute", bottom:10, left:10, background:"rgba(0,0,0,0.8)", padding:"5px", borderRadius:"4px", pointerEvents:"none", fontSize:"11px"}}>
                <div style={{fontWeight:"bold", color:"#c8a850"}}>{tooltip.terr.n}</div>
@@ -332,7 +299,6 @@ export default function DiplomacyApp() {
         {/* Action Panel */}
         <div style={{background:"#0e121a", padding:"10px", borderRadius:"4px", border:"1px solid #222"}}>
           {phase === "Adjust" ? (
-             /* ADJUSTMENT CONTROLS */
              <div>
                <div style={{fontSize:"10px", marginBottom:5, color:"#666", textTransform:"uppercase"}}>Adjustment Orders</div>
                {adjustmentNeeded > 0 && selTerritory ? (
@@ -351,7 +317,6 @@ export default function DiplomacyApp() {
                ) : <div style={{fontSize:"11px", fontStyle:"italic", color:"#444"}}>Select Map Location to Act</div>}
              </div>
           ) : (
-             /* MOVE / RETREAT CONTROLS */
              <div>
                <div style={{fontSize:"10px", marginBottom:5, color:"#666", textTransform:"uppercase"}}>
                  {selectedUnit ? `${selectedUnit.type} in ${selectedUnit.loc}` : "Select Unit"}
@@ -373,7 +338,6 @@ export default function DiplomacyApp() {
                      )}
                    </select>
 
-                   {/* MOVE / RETREAT DESTINATION */}
                    {(orderType === "Move" || orderType === "Retreat" || orderType === "Convoy") && (
                      <select style={{...SELECT_STYLE, marginTop:5}} value={orderTo} onChange={e=>setOrderTo(e.target.value)}>
                        <option value="">Dest...</option>
@@ -381,13 +345,13 @@ export default function DiplomacyApp() {
                      </select>
                    )}
 
-                   {/* SUPPORT TARGETS */}
                    {(orderType.startsWith("Support") || orderType==="Convoy") && (
                      <select style={{...SELECT_STYLE, marginTop:5}} value={orderSupLoc} onChange={e=>setOrderSupLoc(e.target.value)}>
                        <option value="">Unit to {orderType==="Convoy"?"Convoy":"Support"}...</option>
-                       {(orderType==="Convoy" ? units.filter(u=>u.type==="A") : adjUnits).map(u => (
-                         <option key={u.loc || u.unit.loc} value={u.loc || u.unit.loc}>{u.loc || u.unit.loc}</option>
-                       ))}
+                       {orderType === "Convoy" 
+                          ? units.filter(u=>u.type==="A").map(u => <option key={u.loc} value={u.loc}>{u.loc}</option>)
+                          : adjUnits.map(u => <option key={u.loc} value={u.loc}>{u.loc}</option>)
+                       }
                      </select>
                    )}
                    
@@ -418,7 +382,8 @@ export default function DiplomacyApp() {
         <button onClick={processOrders} style={{padding:12, background:"#135", color:"#fff", border:"none", fontWeight:"bold", cursor:"pointer"}}>
           RESOLVE {phase.toUpperCase()}
         </button>
-
+        
+        <div style={{textAlign:"center", fontSize:"9px", color:"#3a4a5a", fontFamily:"monospace", textTransform:"uppercase"}}>daniel shengyi</div>
       </div>
     </div>
   );
